@@ -1,4 +1,4 @@
-"""ATM Dashboard – initial Cloud Run-ready Streamlit application."""
+"""ATM Dashboard – Streamlit Community Cloud and Neon PostgreSQL."""
 import os
 
 import streamlit as st
@@ -16,7 +16,7 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     st.divider()
-    st.caption("Version 0.1 · Första driftsättning")
+    st.caption("Version 0.2 · Neon-anslutning")
 
 if page == "Översikt":
     st.subheader("Översikt")
@@ -28,18 +28,25 @@ if page == "Översikt":
     st.info("Nyckeltal visas när respektive vy har kopplats till Neon.")
 
     st.subheader("Databasanslutning")
-    if not os.getenv("DATABASE_URL"):
-        st.warning("DATABASE_URL saknas. Lägg till anslutningen som en hemlighet i Cloud Run – aldrig i GitHub.")
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        try:
+            database_url = st.secrets.get("DATABASE_URL")
+        except (FileNotFoundError, KeyError):
+            database_url = None
+
+    if not database_url:
+        st.warning("DATABASE_URL saknas. Lägg in den under Streamlit Community Cloud → App settings → Secrets. Lägg aldrig in lösenord i GitHub.")
     else:
         try:
             import psycopg
-            with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=5) as conn:
+            with psycopg.connect(database_url, connect_timeout=5) as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("SELECT 1")
                     cursor.fetchone()
             st.success("Neon PostgreSQL svarar.")
         except Exception:
-            st.error("Databasen kunde inte nås. Kontrollera Cloud Runs DATABASE_URL och nätverksinställningar.")
+            st.error("Databasen kunde inte nås. Kontrollera DATABASE_URL i Streamlit Secrets och Neons nätverksinställningar.")
 else:
     st.subheader(page)
     st.info(f"Vyn {page.lower()} är förberedd. Här lägger vi snart in funktioner mot Neon.")
