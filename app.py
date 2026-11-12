@@ -13,11 +13,18 @@ COLUMN_LABELS = {
     "fornamn": "Förnamn",
     "efternamn": "Efternamn",
     "organisation": "Organisation",
-    "kategori": "Kategori",
+    "kategori_1": "Kategori 1",
+    "kategori_2": "Kategori 2",
     "roll": "Roll",
     "epostadress": "E-post",
     "telefonnummer": "Telefon",
-    "stad": "Ort",
+    "ort": "Ort",
+    "faktureringskontakt": "Faktureringskontakt",
+    "faktura_epost": "Faktura-e-post",
+    "adress": "Adress",
+    "postnummer": "Postnummer",
+    "organisationsnummer": "Organisationsnummer",
+    "momsnummer": "Momsnummer",
     "land": "Land",
     "stift": "Stift",
     "hemsida": "Hemsida",
@@ -44,10 +51,11 @@ def get_database_url():
 def load_contacts(_database_url):
     """Read only: never modify the production contacts table."""
     sql = """
-        SELECT kontakt_id, fornamn, efternamn, organisation, kategori,
-               roll, epostadress, telefonnummer, stad, land, stift,
+        SELECT kontakt_id, fornamn, efternamn, organisation, kategori_1, kategori_2,
+               roll, epostadress, telefonnummer, ort, land, stift,
                hemsida, kommentar, evenemang_start, evenemang_slut,
-               import, skapad_at
+               import, skapad_at, faktureringskontakt, faktura_epost,
+               adress, postnummer, organisationsnummer, momsnummer
           FROM public.kontakter
          ORDER BY organisation NULLS LAST, efternamn NULLS LAST,
                   fornamn NULLS LAST, kontakt_id
@@ -204,8 +212,8 @@ elif page == "Kontakter":
     search_col, cat_col, city_col = st.columns([2, 1, 1])
     with search_col:
         search = st.text_input("Sök", placeholder="Namn, organisation, e-post, ort …")
-    categories = sorted({display(c["kategori"]).strip() for c in contacts if c.get("kategori")})
-    cities = sorted({display(c["stad"]).strip() for c in contacts if c.get("stad")})
+    categories = sorted({display(c["kategori_1"]).strip() for c in contacts if c.get("kategori_1")})
+    cities = sorted({display(c["ort"]).strip() for c in contacts if c.get("ort")})
     with cat_col:
         selected_categories = st.multiselect("Kategori", categories)
     with city_col:
@@ -213,7 +221,7 @@ elif page == "Kontakter":
 
     terms = search.casefold().strip().split()
     searchable_fields = ("fornamn", "efternamn", "organisation", "epostadress",
-                         "stad", "land", "kategori", "roll", "stift", "telefonnummer")
+                         "ort", "land", "kategori_1", "kategori_2", "roll", "stift", "telefonnummer")
     filtered = [
         c for c in contacts
         if (not selected_categories or display(c.get("kategori")).strip() in selected_categories)
@@ -228,8 +236,8 @@ elif page == "Kontakter":
             load_contacts.clear()
             st.rerun()
 
-    shown = ("kontakt_id", "fornamn", "efternamn", "organisation", "kategori",
-             "roll", "epostadress", "telefonnummer", "stad", "land")
+    shown = ("kontakt_id", "fornamn", "efternamn", "organisation", "kategori_1", "kategori_2",
+             "roll", "epostadress", "telefonnummer", "ort", "land")
     st.dataframe(
         [{COLUMN_LABELS[key]: display(c.get(key)) for key in shown} for c in filtered],
         hide_index=True,
