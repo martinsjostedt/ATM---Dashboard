@@ -28,3 +28,7 @@ The dashboard starts without a database connection; its overview checks connecti
 ## Security
 
 Before processing customer/contact/invoice data, restrict Cloud Run access and add application authentication/authorization. A public Cloud Run URL alone is **not** suitable for private ATM records.
+
+## Deployment retry
+
+A new commit on the `main` branch is intended to trigger the connected Google Cloud Build deployment for the `atmdashboard` service. Verify the actual build result in Google Cloud Console → Cloud Build → History.
