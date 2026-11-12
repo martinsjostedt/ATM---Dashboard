@@ -1,5 +1,6 @@
 """ATM Dashboard – Jenny Lind | Artist Booking & Tour Management."""
 import os
+import hmac
 
 import psycopg
 from psycopg.rows import dict_row
@@ -57,6 +58,91 @@ def load_contacts(_database_url):
             return cur.fetchall()
 
 
+
+@st.cache_data(ttl=60, show_spinner="Hämtar fakturor från Neon…")
+def load_invoices(_database_url):
+    """Read invoice headers without changing any accounting records."""
+    with psycopg.connect(_database_url, connect_timeout=8, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, fakturanummer, mottagare_namn, totalbelopp, valuta, status,
+                       fakturadatum
+                  FROM public.fakturor
+                 ORDER BY fakturadatum DESC NULLS LAST, id DESC
+            """)
+            return cur.fetchall()
+
+
+@st.cache_data(ttl=60, show_spinner="Hämtar fakturadetaljer…")
+def load_invoice_detail(_database_url, invoice_id):
+    """Fetch the exact stored invoice and its associated invoice lines."""
+    with psycopg.connect(_database_url, connect_timeout=8, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM public.fakturor WHERE id = %s", (invoice_id,))
+            invoice = cur.fetchone()
+            if invoice is None:
+                return None, []
+            cur.execute("""
+                SELECT * FROM public.fakturarader
+                 WHERE faktura_id = %s
+                 ORDER BY sortering, id
+            """, (invoice_id,))
+            lines = cur.fetchall()
+            return invoice, lines
+
+
+def secret_value(name):
+    value = os.getenv(name)
+    if value:
+        return value
+    try:
+        return st.secrets.get(name)
+    except (FileNotFoundError, KeyError):
+        return None
+
+
+def invoice_access_allowed():
+    """Block invoice information unless a server-side access password is configured."""
+    secret = secret_value("ATM_DASHBOARD_PASSWORD")
+    if not secret:
+        st.error("Fakturavyn är låst tills ATM_DASHBOARD_PASSWORD har lagts in i Streamlit Secrets.")
+        st.caption("Lägg in ett starkt lösenord i Streamlit → App settings → Secrets. Lagra aldrig lösenordet i GitHub.")
+        return False
+    if st.session_state.get("invoice_authorized") is True:
+        return True
+    with st.form("invoice_login"):
+        password = st.text_input("Lösenord för fakturor", type="password")
+        submitted = st.form_submit_button("Öppna fakturor")
+    if submitted:
+        if hmac.compare_digest(password, secret):
+            st.session_state["invoice_authorized"] = True
+            st.rerun()
+        else:
+            st.error("Fel lösenord.")
+    return False
+
+
+def invoice_field_label(field):
+    overrides = {
+        "id": "Databas-ID", "fakturanummer": "Fakturanummer",
+        "mottagare_namn": "Mottagare namn", "totalbelopp": "Summa",
+        "netto": "Netto", "momsbelopp": "Momsbelopp",
+        "status": "Status", "valuta": "Valuta",
+    }
+    return overrides.get(field, field.replace("_", " ").capitalize())
+
+
+def invoice_details_fields(invoice, fields):
+    """Show each stored invoice field, including nulls, as a read-only value."""
+    for field in fields:
+        st.text_input(
+            invoice_field_label(field),
+            value=display(invoice.get(field)) or "—",
+            disabled=True,
+            key=f"invoice_{invoice['id']}_{field}",
+        )
+
+
 def display(value):
     return "" if value is None else str(value)
 
@@ -74,13 +160,15 @@ st.caption("Artist Booking & Tour Management · ATM")
 
 with st.sidebar:
     st.header("ATM")
+    pages = ["Översikt", "Kontakter", "Projekt", "Fakturor", "Kampanjer"]
     page = st.radio(
         "Navigering",
-        ["Översikt", "Kontakter", "Projekt", "Fakturor", "Kampanjer"],
+        pages,
+        index=3 if st.query_params.get("faktura_id") else 0,
         label_visibility="collapsed",
     )
     st.divider()
-    st.caption("Version 0.3 · Kontakter (läsning)")
+    st.caption("Version 0.4 · Kontakter och fakturor (läsning)")
 
 database_url = get_database_url()
 
@@ -173,6 +261,122 @@ elif page == "Kontakter":
             st.caption(f"Registrerad: {selected['skapad_at']}")
     else:
         st.info("Inga kontakter matchar filtren.")
+
+
+elif page == "Fakturor":
+    st.subheader("Fakturor")
+    st.caption("Neon · public.fakturor · endast läsning")
+    if not invoice_access_allowed():
+        st.stop()
+    if not database_url:
+        st.error("DATABASE_URL saknas. Lägg in anslutningen i Streamlit Secrets.")
+        st.stop()
+
+    selected_param = st.query_params.get("faktura_id")
+    if selected_param:
+        try:
+            selected_id = int(selected_param)
+            if selected_id <= 0:
+                raise ValueError("Invalid id")
+        except (ValueError, TypeError):
+            st.error("Ogiltigt faktura-ID.")
+            if st.button("Till fakturalistan"):
+                del st.query_params["faktura_id"]
+                st.rerun()
+            st.stop()
+        if st.button("← Till alla fakturor"):
+            del st.query_params["faktura_id"]
+            st.rerun()
+        try:
+            invoice, invoice_lines = load_invoice_detail(database_url, selected_id)
+        except psycopg.Error:
+            st.error("Fakturan kunde inte hämtas från Neon.")
+            st.stop()
+        if not invoice:
+            st.warning("Fakturan finns inte.")
+            st.stop()
+
+        st.markdown(f"### Faktura {display(invoice.get('fakturanummer')) or selected_id}")
+        st.caption(f"{display(invoice.get('mottagare_namn'))} · {display(invoice.get('status'))}")
+        groups = [
+            ("Fakturauppgifter", ["id", "fakturanummer", "fakturadatum", "forfallodatum",
+                "betalningsvillkor_dagar", "status", "valuta", "sprak", "projekt_id",
+                "var_referens", "er_referens", "drojsmalsvillkor", "betalningsreferens",
+                "skickad_datum", "betald_datum", "inbetalt_belopp"]),
+            ("Mottagare", [k for k in invoice if k.startswith("mottagare_")]),
+            ("Avsändare", [k for k in invoice if k.startswith("avsandare_")]),
+            ("Belopp", ["netto", "momsbelopp", "oresutjamning", "totalbelopp"]),
+            ("Texter och metadata", ["fakturatext", "intern_anteckning", "skapad_at",
+                "uppdaterad_at"]),
+        ]
+        seen = set()
+        for heading, fields in groups:
+            fields = [field for field in fields if field in invoice]
+            seen.update(fields)
+            with st.expander(heading, expanded=(heading == "Fakturauppgifter")):
+                left, right = st.columns(2)
+                for n, field in enumerate(fields):
+                    with (left if n % 2 == 0 else right):
+                        invoice_details_fields(invoice, [field])
+        remaining = [key for key in invoice if key not in seen]
+        if remaining:
+            with st.expander("Övriga fakturafält"):
+                invoice_details_fields(invoice, remaining)
+
+        st.markdown("#### Fakturarader")
+        if invoice_lines:
+            st.dataframe(
+                [{k: display(v) for k, v in line.items()} for line in invoice_lines],
+                hide_index=True, use_container_width=True,
+            )
+        else:
+            st.info("Inga fakturarader finns registrerade på denna faktura.")
+
+    else:
+        try:
+            invoices = load_invoices(database_url)
+        except psycopg.Error:
+            st.error("Fakturorna kunde inte hämtas från Neon.")
+            st.stop()
+        controls, count = st.columns([3, 1])
+        with controls:
+            query = st.text_input("Sök faktura", placeholder="Fakturanummer, mottagare eller status")
+        with count:
+            if st.button("Uppdatera", use_container_width=True):
+                load_invoices.clear()
+                load_invoice_detail.clear()
+                st.rerun()
+        terms = query.strip().casefold().split()
+        filtered_invoices = [
+            inv for inv in invoices
+            if all(term in " ".join(display(inv.get(k)) for k in
+               ("fakturanummer", "mottagare_namn", "status")).casefold()
+               for term in terms)
+        ]
+        st.caption(f"{len(filtered_invoices)} av {len(invoices)} fakturor")
+        rows = []
+        for inv in filtered_invoices:
+            amount = inv.get("totalbelopp")
+            money = (f"{amount:,.2f}".replace(",", " ").replace(".", ",")
+                     if amount is not None else "—")
+            currency = display(inv.get("valuta")).strip()
+            rows.append({
+                "Fakturanummer": display(inv.get("fakturanummer")) or "—",
+                "Mottagare_namn": display(inv.get("mottagare_namn")) or "—",
+                "Summa": money + (f" {currency}" if amount is not None and currency else ""),
+                "Status": display(inv.get("status")) or "—",
+                "Detaljer": f"https://atmdash.streamlit.app/?faktura_id={inv['id']}",
+            })
+        st.dataframe(
+            rows, hide_index=True, use_container_width=True, height=520,
+            column_config={
+                "Detaljer": st.column_config.LinkColumn(
+                    "Visa faktura", display_text="Öppna →"
+                )
+            },
+        )
+        if not invoices:
+            st.info("Inga fakturor finns i Neon ännu.")
 
 else:
     st.subheader(page)
