@@ -1,10 +1,12 @@
 """ATM Dashboard – Jenny Lind | Artist Booking & Tour Management."""
 import os
 import hmac
+import re
 
 import psycopg
 from psycopg.rows import dict_row
 import streamlit as st
+from campaign_gmail import export_gmail_draft, fetch_neon_image
 
 st.set_page_config(page_title="ATM | Jenny Lind", page_icon="🎼", layout="wide")
 
@@ -160,7 +162,7 @@ st.caption("Artist Booking & Tour Management · ATM")
 
 with st.sidebar:
     st.header("ATM")
-    pages = ["Översikt", "Kontakter", "Projekt", "Fakturor", "Kampanjer"]
+    pages = ["Översikt", "Kontakter", "Projekt", "Fakturor", "Kampanjer", "Kampanjmejl"]
     page = st.radio(
         "Navigering",
         pages,
@@ -377,6 +379,76 @@ elif page == "Fakturor":
         )
         if not invoices:
             st.info("Inga fakturor finns i Neon ännu.")
+
+
+elif page == "Kampanjmejl":
+    st.subheader("Kampanjmejl → Gmail")
+    st.caption("Exportera som utkast med bild inuti mejlet och som nedladdningsbar bilaga.")
+    if not invoice_access_allowed():
+        st.stop()
+    if not database_url:
+        st.error("DATABASE_URL saknas.")
+        st.stop()
+    try:
+        with psycopg.connect(database_url, connect_timeout=8, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT m.id, m.namn, m.amne, m.meddelande, m.bilaga_1,
+                           m.bilaga_2, m.bilaga_3, k.namn AS kampanj
+                    FROM public.kampanjmejl m
+                    LEFT JOIN public.kampanjer k ON k.id = m.kampanj_id
+                    ORDER BY m.id DESC
+                """)
+                campaign_emails = cur.fetchall()
+    except psycopg.Error:
+        st.error("Kunde inte hämta kampanjmejl från Neon.")
+        st.stop()
+    if not campaign_emails:
+        st.info("Inga kampanjmejl hittades.")
+        st.stop()
+    chosen_id = st.selectbox(
+        "Välj kampanjmejl",
+        [x["id"] for x in campaign_emails],
+        format_func=lambda mid: next(
+            f"{x['kampanj'] or 'Ingen kampanj'} – {x['namn']} (#{mid})"
+            for x in campaign_emails if x["id"] == mid
+        ),
+    )
+    chosen = next(x for x in campaign_emails if x["id"] == chosen_id)
+    st.write("**Ämne:**", chosen["amne"])
+    st.write("**Bildfiler:**", ", ".join(
+        x.split("/")[-1] for x in (chosen["bilaga_1"], chosen["bilaga_2"], chosen["bilaga_3"]) if x
+    ) or "Inga")
+    st.text_area("Mejlets källtext (förhandsvisning)", chosen["meddelande"] or "", height=240, disabled=True)
+    recipient = st.text_input("Mottagarens e-postadress", placeholder="namn@festival.se")
+    required = ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN",
+                "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ENDPOINT_URL_S3")
+    missing = [name for name in required if not secret_value(name)]
+    if missing:
+        st.warning("För att aktivera exporten, konfigurera Streamlit Secrets: " + ", ".join(missing))
+    if st.button("Skapa Gmail-utkast med bilder", disabled=bool(missing) or not recipient):
+        try:
+            settings = {name: secret_value(name) for name in required}
+            settings["AWS_REGION"] = secret_value("AWS_REGION") or "us-east-2"
+            image_keys = [chosen[f"bilaga_{i}"] for i in range(1, 4) if chosen[f"bilaga_{i}"]]
+            placeholders = re.findall(r'<img\b[^>]*src=["\']cid:([^"\']+)["\']', chosen["meddelande"] or "", re.I)
+            if len(placeholders) > len(image_keys):
+                raise ValueError("Fler inbäddade bildmarkörer än tillgängliga bildfiler.")
+            if image_keys and not placeholders:
+                raise ValueError("Bildfil finns men ingen CID-bildmarkör i mejlet.")
+            images = {}
+            for cid, key in zip(placeholders, image_keys):
+                images[cid] = fetch_neon_image(key, settings)
+            if len(images) != len(placeholders):
+                raise ValueError("Dubblerade CID-markörer. Varje bild behöver ett unikt CID.")
+            draft_id = export_gmail_draft(
+                chosen["amne"], chosen["meddelande"] or "", recipient, images, settings
+            )
+            st.success("Gmail-utkast skapat. Ingenting har skickats.")
+            st.link_button("Öppna Gmail-utkast", f"https://mail.google.com/mail/u/0/#drafts?compose={draft_id}")
+        except Exception as exc:
+            st.error("Exporten misslyckades. Kontrollera Neon/Gmail-konfiguration och bildreferenser.")
+            st.caption(f"Feltyp: {type(exc).__name__}")
 
 else:
     st.subheader(page)
